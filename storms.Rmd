@@ -1,0 +1,804 @@
+---
+title: "What Types of Weather Events are the Most Harmful: Exploring the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database"
+author: "Stephanie Leif"
+date: "1/22/2021"
+output: pdf_document
+---
+
+# Reproducible Research: Peer Assessment 2
+
+******
+
+
+
+```{r chunk-sources}
+
+
+library(tidyverse)  
+library(ggplot2)
+library(data.table)
+library(gridExtra)
+library(RColorBrewer)
+library(reshape2)
+
+the.url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+filename <- "repdata_data_StormData.csv.bz2"
+
+database.info.url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf"
+storm.events.faq.url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf"
+```
+
+
+## Data Processing
+
+### Download and Read the Data
+```{r chunk-load}
+
+if (!file.exists(filename)) {
+  download.file(url = the.url, destfile = filename, method = "curl")
+}
+
+## authenticate that the file downloaded is the proper size
+## 49,177,144 bytes
+
+if (file.size(filename) != 49177144) {
+  print("Error in downloading file.  File is Incorrect Size")
+}
+```
+```{r import-data, cache=TRUE}
+mydata <- read.csv(filename, header = TRUE)
+```
+### Authenticate the data read in
+```{r chunk-authenticate}
+
+## authenticate that read got proper dimensions of data
+##  902297 records on 37 variables
+if (length(colnames(mydata)) != 37) {
+  print(paste(
+    "Error in reading file.  File has ",
+    len(colnames(mydata)), " instead of 37"
+  ))
+}
+
+if (nrow(mydata) != 902297) {
+  print(paste(
+    "Error in reading file.  File has ",
+    nrow(mydata), " rows instead of 902,297"
+  ))
+}
+```
+
+First, the data is download from 
+`r the.url` then it is authenticated to check that it has the proper number of columns and rows.
+
+### Remove Unused Columns
+
+```{r chunk-selectColumns, cache=TRUE}
+## 1.  Remove unused columns
+
+mydata <- mydata %>% select(EVTYPE, FATALITIES, INJURIES, PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP)
+```
+There are no NA values in the resulting data set.
+
+### Convert property and crop damage to 1 column each
+
+The crop damage and property damage are reported as a combination of PROPDMGEXP and PROPDMG for property and CROPDMGEXP and CROPDMG for crop.  I clean this up to be two columns: prop.damage and crop.damage.
+
+There is an extensive discussion at https://rstudio-pubs-static.s3.amazonaws.com/58957_37b6723ee52b455990e149edde45e5b6.html about how converting the exponents is not necessary for determing the types of events that are the most harmful to people, property and crops.  The conversion is straightforward and runs fairly quickly and yields having 1 column of data in the same units for the same category.
+
+```{r chunk-convertDamage, cache=TRUE}
+## 2.  Convert damage to 1 numeric instead of base and exponent
+
+## PROPDMGVAL PROPDMGEXP and CROP...
+## fix exponents
+## B or b = Billion, M or m = Million, K or k = Thousand, H or h = Hundred).
+## The number from one to ten represent the power of ten ##(10^The number).
+## The symbols "-", "+" and "?" refers to less than, ##greater than and low certainty.
+## You have the option to ignore ##these three symbols altogether.
+
+## damage = DMGVAL * 10^DMGEXP
+
+
+countna <- sum(is.na(mydata$PROPDMGEXP)) +
+  sum(is.na(mydata$CROPDMGEXP)) +
+  sum(is.na(mydata$PROPDMG)) +
+  sum(is.na(mydata$CROPDMG))
+
+if(countna >0){
+  print("Error: dataset should not have NA values")
+}
+
+## No NA values for property or crop
+
+g <- function(it, me) {
+  return(grepl(it, me, ignore.case = TRUE))
+}
+
+
+cleanexp <- function(v) {
+  ## clean exponents to be numbers 0-9
+  ev <- as.character(v)
+  myclean <- case_when(
+    g("b|billion", ev) ~ "9",
+    g("m|million", ev) ~ "6",
+    g("k|thousand", ev) ~ "3",
+    g("h|hundred", ev) ~ "2",
+    g("+[0-9]", ev) ~ as.character(ev),
+    g("-", ev) ~ "0",
+    g("?", ev) ~ "0",
+    g("+", ev) ~ "0",
+    g(">", ev) ~ "0",
+    g("<", ev) ~ "0",
+    g("[:space:]",ev) ~ "0",
+    g("[:blank:]",ev) ~ "0",
+    TRUE ~ ev
+  )
+  return(myclean)
+}
+
+
+
+
+doexp <- function(cb, ce) {
+  ## do the exponentiation
+  b <- as.numeric(cb)
+  e <- as.numeric(ce)
+  if (is_null(e)) {
+    e <- 0
+  }
+  answ <- b * (10^e)
+  if (is_null(answ)) {
+    return(0)
+  }
+  else {
+    return(answ)
+  }
+}
+
+```
+It is important to correctly handle the exponent handle having an unexpected value.  This is done within the do_exp function by returning 0 if as.numeric() returns NULL.
+
+
+### Remove rows that have 0 for all 4 kinds of harm.
+
+
+```{r chunk-remove0, cache=TRUE}
+harmlist <- c("prop.damage", "crop.damage", "FATALITIES", "INJURIES")
+
+
+mydata <- mydata %>%
+  mutate(
+    PROPDMGEXP = cleanexp(PROPDMGEXP),
+    CROPDMGEXP = cleanexp(CROPDMGEXP),
+    prop.damage = doexp(PROPDMG, PROPDMGEXP),
+    crop.damage = doexp(CROPDMG, CROPDMGEXP)
+  ) %>%
+
+  filter(prop.damage > 0 |
+    crop.damage > 0 |
+    FATALITIES > 0 |
+    INJURIES > 0) %>% 
+  select(all_of(harm.names), "EVTYPE")
+
+```
+
+###  Explore the data as it is with the original event type names
+
+First aggregate all the harm factors over evtype
+
+
+```{r chunk-visualizeOriginal, cache=TRUE}
+
+print(str(mydata))
+
+gdf <- aggregate(. ~ EVTYPE, mydata, sum)
+
+```
+ Next see how many unique EVTYPE we have:
+ 
+```{r chunk-countUnique}
+
+count.unique<- function(mylist){
+  return(length(unique(mylist)))
+} 
+
+ 
+ print(paste(count.unique(gdf$EVTYPE), "number of EVTYPE in data set"))
+ 
+```
+ 
+Let's reduce the 488 to just the EVTYPE that contribute the top 5 of the harm
+
+```{r chunk-most}
+
+
+fatal.chunk <- slice_max(gdf,
+  FATALITIES,
+  n = 5
+)
+fatal.min <- min(fatal.chunk$FATALITIES)
+
+injury.chunk <- slice_max(gdf,
+  INJURIES,
+  n = 5
+)
+injury.min <- min(injury.chunk$INJURIES)
+
+prop.damage.chunk <- slice_max(gdf,
+  prop.damage,
+  n = 5
+)
+prop.damage.min <- min(prop.damage.chunk$prop.damage)
+
+
+crop.chunk <- slice_max(gdf,
+  crop.damage,
+  n = 5
+)
+crop.damage.min <- min(crop.chunk$crop.damage)
+
+gdf2 <- gdf %>% filter(prop.damage > prop.damage.min |
+  crop.damage > crop.damage.min |
+  FATALITIES > fatal.min |
+  INJURIES > injury.min)
+
+
+ print(paste(count.unique(gdf2$EVTYPE), "number of EVTYPE in data set"))
+
+
+```
+13 is small enough we should be able to visualize the data set by percentages.
+
+To look at the proportions ordinarily we would just convert the data from wide format to narrow format and then calculate the relative proportions but the values of prop.damage and crop.damage would completely overwhelm fatalities and injuries.  Instead we need to convert to proportions before we go from wide to narrow.
+
+
+
+
+```{r chunk-EVTYPErawvisual}
+
+gdf3 <- gdf2 %>%
+  mutate(
+    p.prop.damage = prop.damage / sum(prop.damage),
+    p.crop.damage = crop.damage / sum(crop.damage),
+    p.fatal = FATALITIES/ sum(FATALITIES),
+    p.injury = INJURIES / sum(INJURIES)
+  ) 
+
+rawEVTYPE <- unique(gdf3$EVTYPE)
+# convert wide data format to long format
+
+
+df.long <- melt(gdf3, id.vars="EVTYPE",
+                measure.vars=c("p.fatal","p.injury","p.prop.damage",
+                               "p.crop.damage"),
+                variable.name="harm",
+                value.name="value") 
+
+print(summary(df.long))
+
+
+# order samples by id   
+
+df.long <- df.long %>% arrange(harm,desc(value))
+
+# plot using ggplot
+
+before <- ggplot(df.long, aes(x=harm, y=value, fill=EVTYPE)) + 
+  geom_bar(stat="identity") +
+  scale_x_discrete(guide = guide_axis(n.dodge = 5))+
+  ylab("Percentage of total harm")
+  theme(axis.title.x = element_blank())
+
+
+```
+
+
+
+
+
+##  Cleaning event type names
+
+In the data examined above the names of the events that comprised the top 5 of every category are:
+
+```{r chunk-printrawnames}
+print(rawEVTYPE)
+```
+
+There does not seem to be a formative difference between "EXCESSIVE HEAT" and "HEAT".  There are probably other similar event names in the data set that could be masking the true events that are causing the most harm.
+
+### Grouping EVTYPE
+
+```{r chunk-mergeEvent, cache=TRUE}
+storm.s <- "percipitation|lightning|thunder|storm|PRECIPATATION|rain|heavy|shower|wet|HURRICANE|Tropical Storm|TYPHOON"
+
+heat.s <-"*hot |record +h|heat|warmth|warm|red|dry|hot|excessive heat|high temperature"
+
+surf.s <- "surf|waves|swell|sea|wave|tide|coastal|rip"
+
+snow.s <- "hypothermia|avalanche|snow|winter|blizzard"
+
+cleane <- function(ev) {
+  myclean <- case_when(
+    g(storm.s, ev) ~ "Storm",
+    g("hail", ev) ~ "Hail",
+    g("*flood", ev) ~ "Flood",
+    g("*surge", ev) ~ "Storm Surge",
+    g("tornado|funnel|Torndao", ev) ~ "Tornado",
+    g("flood|stream|flash|high water", ev) ~ "Flood",
+    g(surf.s, ev) ~ "High Seas",
+    g("wind|wnd", ev) ~ "Wind",
+    g(snow.s, ev) ~ "Snow",
+    g("Extended Cold|Extreme Cold|Cold T+", ev) ~ "Cold",
+    g("Cold W+|Record Cold|Low Temperature", ev) ~ "Cold",
+    g("ice|Icy Roads", ev) ~ "Ice",
+    g("Freezing Drizzle|sleet|Mixed Precip",ev) ~ "Sleet",
+    g(heat.s, ev) ~ "Heat",
+    g(storm.s, ev) ~ "Storm",
+    g("mud|landslide", ev) ~ "Mudslide",
+    g("fire|smoke", ev) ~ "Fire",
+    g("fog|vog", ev) ~ "Fog",
+    g("dam", ev) ~ "Dam",
+    g("drought|driest", ev) ~ "Drought",
+    g("dust", ev) ~ "Dust",
+    g("volcanic", ev) ~ "Volcanic",
+    g("waterspout", ev) ~ "Waterspout",
+    g("summary", ev) ~ "Summary",
+    TRUE ~ str_to_title(ev)
+  )
+  return(myclean)
+}
+
+
+```
+Get the top 5 of each of the harms (fatalities, injuries, property damage, and crop damage) of the data set of merged event types.
+
+```{r chunkcleandata, cache = TRUE}
+
+clean.data.fatal <- mydata %>%
+  mutate(evtype = cleane(EVTYPE)) %>%
+  filter(FATALITIES > 0) %>%
+  group_by(evtype) %>%
+  summarise(fatal = sum(FATALITIES)) %>%
+  arrange(desc(fatal), by_group = TRUE)
+unique.evtypes <- unique(clean.data.fatal$evtype)
+
+number.evtypes <- length(unique.evtypes)
+
+clean.data.fatal<- 
+  clean.data.fatal[order(desc(clean.data.fatal$fatal)), ][1:5, ]
+
+clean.data.injury <- mydata %>%
+  mutate(evtype = cleane(EVTYPE)) %>%
+  filter(INJURIES > 0) %>%
+  group_by(evtype) %>%
+  summarise(injuries = sum(INJURIES)) %>%
+  arrange(desc(injuries), by_group = TRUE)
+clean.data.injury<- 
+  clean.data.injury[order(desc(clean.data.injury$injuries)), ][1:5, ]
+
+clean.data.crop <- mydata %>%
+  mutate(evtype = cleane(EVTYPE)) %>%
+  filter(crop.damage > 0) %>%
+  group_by(evtype) %>%
+  summarise(total.crop = sum(crop.damage)) %>%
+  arrange(desc(total.crop), by_group = TRUE)
+
+clean.data.crop<- 
+  clean.data.crop[order(desc(clean.data.crop$total.crop)), ][1:5, ]
+
+clean.data.property <- mydata %>%
+  mutate(evtype = cleane(EVTYPE)) %>%
+  filter(prop.damage > 0) %>%
+  group_by(evtype) %>%
+  summarise(total.prop = sum(prop.damage)) %>%
+  arrange(desc(total.prop), by_group = TRUE)
+
+clean.data.property<- 
+  clean.data.property[order(desc(clean.data.property$total.prop)), ][1:5, ]
+
+```
+The EVTYPE column is changed the most.  I grouped obvious typos such as "PRECIPATATION" with "PERCIPITATION".  The full list for storm is:
+`r storm.s`  The combination of event names controls the magnitude of that event in the data.  For example, I grouped Hurricane with Tropical Storms, Typhoons, and ordinary storms.  I see the difference as that of degree not of kind.
+
+Another combination that noticeably effects the outcome is combining heat, warmth, warm, red, dry, hot, excessive heat,high temperature, record heat into the category "Heat".
+
+```{r chunk-cleannumbers}
+
+print(paste("The resulting data has", number.evtypes, 
+            "of evtypes.  These are:"))
+print(unique.evtypes)
+```
+The second plot will be a panel plot showing the values for the different kinds of harm by EVTYPE
+
+```{r chunk-dataplot}
+
+
+dataplot <- function(df, evtype, yval, ylab) {
+  return(ggplot(
+    df,
+    aes(
+      x = reorder(evtype, -yval), y = yval,
+      fill = evtype, label = yval
+    )
+  ) +
+    geom_bar(stat = "identity") +
+    scale_x_discrete(guide = guide_axis(n.dodge = 2)) +
+    geom_label(colour = "white", size = 3) +
+    guides(fill = guide_legend(title = "Weather Event Type")) +
+    ylab(ylab) +
+    theme(axis.title.x = element_blank()) +
+    scale_fill_brewer(palette = "Dark2") +
+    theme(legend.position = "none"))
+}
+```
+I made a dataplot function because all of the graphs are printed the same way via ggplot.  This reduced errors from repeatedly entering the parameters for the plot.  The instructions want 2 to 3 plots. Thus the use of a panel plot to make one plot do the work of 4.
+
+
+```{r chunk-defineplots}
+
+fatal <- dataplot(
+  clean.data.fatal, clean.data.fatal$evtype,
+  clean.data.fatal$fatal, "Total Fatalities"
+)
+
+
+injury <- dataplot(
+  clean.data.injury, clean.data.injury$evtype,
+  clean.data.injury$injuries, "Total Injuries"
+)
+
+prop <- dataplot(
+  clean.data.property, clean.data.property$evtype,
+  clean.data.property$total.prop, "Total Property Damage"
+)
+
+
+crop <- dataplot(
+  clean.data.crop, clean.data.crop$evtype,
+  clean.data.crop$total.crop, "Total Crop Damage"
+)
+
+
+```
+### Calculating percentages to show which EVTYPE Causes the most Harm
+
+Percentages require the data to be converted from wide to wide with percentages to long.  We start from mydata which is
+
+1. Original data read in
+2. crop.damage made from damage column and exponent column and
+prop.damage made from damage column and exponent column.
+
+Call mutate(evtype = cleane(EVTYPE)) and convert data to percentages, filter out the top values
+
+```{r chunk-cleaneall, cache = TRUE}
+
+clean.data <- mydata %>%
+  mutate(evtype = cleane(EVTYPE)) %>%
+  select(all_of(harm.names), "evtype")
+```
+
+Aggregate the data by the newly assigned evtype category
+
+```{r chunk-aggclean}
+
+clean.gdf <- aggregate(. ~ evtype, clean.data, sum)
+
+```
+filter out the evtypes causing the most harm in each harm category and calculate percentages
+
+```{r chunk-filterclean}
+
+clean.gdf2 <- clean.gdf %>%
+  filter(prop.damage > prop.damage.min |
+    crop.damage > crop.damage.min |
+    FATALITIES > fatal.min |
+    INJURIES > injury.min) %>%
+  mutate(
+    p.prop.damage = prop.damage / sum(prop.damage),
+    p.crop.damage = crop.damage / sum(crop.damage),
+    p.fatal = FATALITIES / sum(FATALITIES),
+    p.injury = INJURIES / sum(INJURIES)
+  ) 
+
+print(str(clean.gdf2))
+```
+While the data is wide prepare a table for the reader to see the max values
+
+```{r chunkcleanmaxes}
+
+t.fatal.clean.chunk <- slice_max(clean.gdf2,
+  FATALITIES,
+  n = 2
+)
+t.fatal.min <- min(t.fatal.clean.chunk$FATALITIES)
+
+t.injury.clean.chunk <- slice_max(clean.gdf2,
+  INJURIES,
+  n = 2
+)
+t.injury.min <- min(t.injury.clean.chunk$INJURIES)
+
+t.prop.clean.chunk <- slice_max(clean.gdf2,
+  prop.damage,
+  n = 2
+)
+t.prop.min <- min(t.prop.clean.chunk$prop.damage)
+
+t.crop.clean.chunk <- slice_max(clean.gdf2,
+crop.damage, n = 2)
+
+t.crop.min <- min(t.crop.clean.chunk$crop.damage)
+
+```
+The maximum number of evtypes we could have in the data would be 2 for each of the 4 harm = 8, but we will have less because evtypes for the most harm overlap between categories of harm.
+
+```{r chunkshowmax}
+showmax <- clean.gdf2 %>% 
+    filter(prop.damage > t.prop.min |
+    crop.damage > t.crop.min |
+    FATALITIES > t.fatal.min |
+    INJURIES > t.injury.min) %>%
+    select(evtype,crop.damage,prop.damage,INJURIES,FATALITIES)
+ 
+colnames(showmax) <- c("evtype", "Crop","Property","Injuries","Fatalities")
+
+showmax <- showmax %>% relocate(.after = c("Fatalities","Injuries","Property","Crop")) %>%
+  mutate(Property = round(Property/1e9,1), Crop = round(Crop/1e9,1))
+
+
+knitr::kable(showmax,
+             caption = "Events causing the most damage.  Property and Crop are in billions")
+```
+
+So for crop damage Drought is the most significant followed by Flood.  For property damage Flood is followed by Tornados.  For Injuries and Fatalities, Tornado followed by flood.
+
+### The same data using percentages
+
+```{r chunktablepercentages}
+
+print(summary(clean.gdf2))
+
+showp <- clean.gdf2 %>%
+         filter(p.crop.damage > mean(p.crop.damage)|
+                p.prop.damage > mean(p.prop.damage)|
+                p.fatal > mean(p.fatal) |
+                p.injury > mean(p.injury)) %>%
+          mutate(p.crop.damage = round(p.crop.damage,2),
+                 p.prop.damage = round(p.prop.damage,2),
+                 p.fatal = round(p.fatal,2),
+                 p.injury = round(p.injury,2)) %>%
+     select("evtype","p.crop.damage",
+       "p.prop.damage",
+       "p.fatal",
+       "p.injury")
+
+ 
+colnames(showp) <- c("evtype", "Crop","Property","Injuries","Fatalities")
+
+showp <- showp %>% relocate(.after = c("Fatalities","Injuries","Property","Crop"))
+
+knitr::kable(showp,
+             caption = "Showing relative percentages of harm")
+
+
+
+
+
+
+```
+p.prop.damage = prop.damage / sum(prop.damage),
+    p.crop.damage = crop.damage / sum(crop.damage),
+    p.fatal = FATALITIES / sum(FATALITIES),
+    p.injury = INJURIES / sum(INJURIES)
+
+### Create a Percentage Plot for this data
+
+Convert data from wide format to long format.
+
+```{r chunk-cleanlong}
+
+clean.df.long <- melt(clean.gdf2, id.vars="evtype",
+                measure.vars=c("p.fatal","p.injury","p.prop.damage",
+                               "p.crop.damage"),
+                variable.name="harm",
+                value.name="value") 
+
+print(summary(clean.df.long))
+
+
+# order samples by id   
+
+clean.df.long <- clean.df.long %>% arrange(harm,desc(value))
+
+print(head(clean.df.long))
+```
+### Create ggplot of processed data
+```{r chunk-ggplotafter}
+# plot using ggplot
+
+after <- ggplot(clean.df.long, 
+                aes(x = harm, y = value, fill = evtype  )) +
+  geom_bar(stat = "identity") +
+  scale_x_discrete(guide = guide_axis(n.dodge = 5)) +
+  ylab("Percentage of total harm") +
+  xlab("After Processing") +
+  theme(axis.title.x = element_blank())
+
+
+
+```
+
+
+
+
+Saving the plots allows manipulation of the output of the plot to the report using the grid.arrange function to provide for panel plots.
+
+
+Harm to people (fatalitites and injuries) is dominated by Tornado.  Harm to property is dominated by Flood and harm to crops is dominated by drought.
+
+## Discussion
+
+Before merging similar evtypes, the same evtypes (Tornado, Flood, Drought) dominated the data.  The difference merging the similar evtypes made the secondary causes more clear.
+
+
+### Validation of Aggregation
+
+We can look deeper into the data to validate the aggregation.
+
+#### Snow
+
+We can check the reasonableness of the snow aggregate by going back to the original dataset and looking at the composition of the EVTYPES that were combined.    
+
+The category "Snow" includes `r snow.s`
+
+
+```{r chunk-admireSnow}
+
+snow.data <- mydata %>% filter(g(snow.s, EVTYPE) & 
+                        (prop.damage >0 | crop.damage >0)) %>%
+                    select(EVTYPE,prop.damage,crop.damage) %>%
+                     filter(crop.damage > mean(crop.damage)) %>%
+                   arrange(desc(crop.damage))
+print(head(snow.data))
+
+snowplot = quickplot(x = EVTYPE, y = crop.damage, data = snow.data)
+
+
+print(summary(snow.data))
+  
+
+```
+#### Heat
+
+"Heat" is in the top 6 of all 4 different harm.  Here is a look to see if the aggregation makes sense and more about the components of "Heat."  I put Drought in the graph with heat so that it is clear that if heat were not aggregated across different event types drought would be responsible for more crop damage.  I classified  "HEATWAVE/DROUGHT" as heat.
+
+```{r chunk-admireHeat}
+
+
+heat.data <- mydata %>% filter((g(heat.s, EVTYPE)|
+                                  (g("Drought",EVTYPE))) & 
+                        ( crop.damage >0))
+
+print(str(heat.data))
+# convert wide data format to long format
+
+df.long <- melt(heat.data,
+  id.vars = "EVTYPE",
+  measure.vars = c(
+    "FATALITIES", "INJURIES", "prop.damage",
+    "crop.damage"
+  ),
+  variable.name = "harm",
+  value.name = "value"
+)
+
+# calculate proportions
+
+
+df.long <- ddply(df.long, .(harm), transform, 
+                 value = value / sum(value))
+
+print(head(df.long))
+
+
+
+
+# This plot is not used in the report
+
+heatplotpercent <- 
+  ggplot(df.long, aes(x=harm, y=value, fill=EVTYPE)) + 
+  geom_bar(stat="identity")+
+scale_x_discrete(guide = guide_axis(n.dodge = 5)) 
+
+```
+Note that the graph heatplotpercent is never rendered in this presentation.  The graph's purpose was to validate the aggregate method and showing it in this report would violate the instructions, so it is never shown.
+
+That provides a look by percentages.  We can also look at how the points of the different EVTYPES are placed on a coerced coordinate plane. Which provides another plot we will not be using in this report.
+
+```{r chunk-moreheat}
+heatbyvalue <- ggplot(
+  heat.data,
+  aes(
+    x = EVTYPE, y = crop.damage / 10000000, color = "Crop $/10^7"
+  )
+) +
+  geom_point() +
+  geom_point(aes(x = EVTYPE, y = prop.damage / 100000, color = "Property/10^5")) +
+  geom_point(aes(x = EVTYPE, y = FATALITIES, color = "Fatalities")) +
+  geom_point(aes(x = EVTYPE, y = INJURIES / 100, color = "Injuries/100")) +
+  scale_x_discrete(guide = guide_axis(n.dodge = 9))
+
+
+
+```
+
+
+
+# Synopsis
+Tornados cause the most harm to people in terms of both fatalities and injuries.
+Flood causes the most harm to property and Drought causes the most damage to crops.
+The primary causes of harm are evident with minimal data processing.
+More processing makes secondary causes easier to determine.  Processing was done by aggregating different values of EVTYPE and by converting two column data:exponent data into on data column.
+
+
+
+## Introduction
+
+
+The goal of this research is to determine:
+
+Across the United States, which types of events (as indicated in the EVTYPE variable)
+are most harmful with respect to population health?
+Across the United States, which types of events have the greatest economic consequences?
+
+All data used to determine the answers to these questions was derived from the datafile provided.
+
+
+## Results
+
+Irregardless of aggregating different EVTYPES, tornados are clearly the most harmful weather event for people.  Floods do the most harm to property and droughts do the most harm to crops. 
+
+### Panel Plot View
+
+```{r chunk-bigpanel fig.cap = "Top Weather Events Causing Harm"}
+grid.arrange(fatal, injury, prop, crop)
+
+```
+### Percentage Plot View
+
+```{r chunk-bigpercentage fig.cap = "Comparing Event Types: Before event aggregation"}
+before
+```
+
+After aggregating evtype we get the following percentage plot
+```{r chunk-bigpercentage fig.cap = "Comparing Event Types: After event aggregation"}
+after
+```
+
+## Conclusion
+
+Extreme weather events hurt and kill people and destroy buildings and crops.  The most dangerous extreme weather events according to the data for people are tornados: they kill the most and they injure the most.  The greatest economic consequences are caused by floods and droughts.  In other words, too much and too little water destroy property and crops and you should take tornado warnings very seriously.
+
+### Methods Sources and References
+
+This analysis is based on the data file stored at <`r the.url`>.  Additional information about this database is available at <`r database.info.url`> and <`r storm.events.faq.url`>.
+
+Percentage plots were derived from stack overflow sample
+https://stackoverflow.com/questions/20837281/order-data-to-plot-barplot-in-ggplot2
+
+
+```{r chunk-lookEVTYPE}
+## created a .csv file to look at all the different evtype present in the data set
+
+evtype.present <- sort(unique(mydata$EVTYPE))
+write.csv(evtype.present, file = "evtype.csv")
+
+## test code to see if myclean works
+
+text.cleanexp <- cleanexp(mydata$PROPDMGEXP)
+print(paste("Property exp test: ", unique(text.cleanexp)))
+text.cleanexp <- cleanexp(mydata$CROPDMGEXP)
+print("Crop exp test: ")
+print(sort(unique(text.cleanexp)))
+```
+
